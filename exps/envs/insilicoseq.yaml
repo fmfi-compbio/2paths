@@ -1,0 +1,6 @@
+name: iss
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - insilicoseq=2.0.1

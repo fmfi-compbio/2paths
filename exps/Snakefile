@@ -1,0 +1,433 @@
+from os.path import join as pjoin
+import gzip
+import random
+
+SEED = 42  # 23
+random.seed(SEED)
+
+CHROMs = ["chr1", "chr13", "chr20"]  # , "chr22"]
+Ns = [16, 32]
+
+REF = config["ref"]
+VCF = config["vcf"]
+WD = config["wd"]
+
+new_sample = ""
+ALL_SAMPLES = {}
+for line in gzip.open(VCF, mode="rt"):
+    if line.startswith("#CHROM"):
+        line = line.strip("\n").split("\t")[10:]  # remove hg38 from the list
+        nh = 1 + 1 + (len(line) - 1) * 2
+        random.shuffle(line)
+        new_sample = line[0]
+        # line = line[1:]
+        # random.shuffle(line)
+        for n in Ns:
+            ALL_SAMPLES[str(n)] = line[: n + 1]
+        break
+print(new_sample, ALL_SAMPLES)
+
+
+# XXX: all these are hardcoded for now, fix before "final" submission
+
+NODE_MAX = 1023  # XXX: why was 1023 and not 1024?
+ALPHA = 0.5  # config["alpha"]
+BETA = -50  # config["beta"]
+
+PARSER = "/nfs/projects6/2paths/2paths-working/cmake-build-debug/gfa_scorer"  # config["binaries"]["gfa_parser"]
+PATH_FINDER = (
+    "/nfs/projects6/2paths/path_finder_binary"  # config["binaries"]["path_finder"]
+)
+ALGO = "greedy"  # config["algorithm"]
+
+
+rule run:
+    input:
+        pjoin(WD, "results.tsv"),
+
+
+rule merge_tsv:
+    input:
+        expand(pjoin(WD, "{chrom}", "alignments.tsv"), chrom=CHROMs),
+        expand(
+            pjoin(WD, "{chrom}", "n{n}", "giraffe-{graph}.tsv"),
+            chrom=CHROMs,
+            n=Ns,
+            graph=["full", "oneout", "sampled", "2paths"],
+        ),
+    output:
+        pjoin(WD, "results.tsv"),
+    shell:
+        """
+        python3 merge_tsv.py {WD} > {output}
+        """
+
+
+rule evaluate_bam:
+    input:
+        bam=pjoin(WD, "{chrom}", "alignments.bam"),
+    output:
+        tsv=pjoin(WD, "{chrom}", "alignments.tsv"),
+    conda:
+        "./envs/pysam.yaml"
+    shell:
+        """
+        python3 stats.py bam {input.bam} > {output.tsv}
+        """
+
+
+rule evaluate_gam:
+    input:
+        gam=pjoin(WD, "{chrom}", "n{n}", "giraffe-{graph}.gam"),
+    output:
+        tsv=pjoin(WD, "{chrom}", "n{n}", "giraffe-{graph}.tsv"),
+    shell:
+        """
+        vg filter --tsv-out "name;is_perfect;identity;cigar" {input.gam} | python3 stats.py gam - > {output.tsv}
+        """
+
+
+rule extract_chrom_fasta:
+    input:
+        fa=REF,
+    output:
+        fa=pjoin(WD, "{chrom}", "reference.fa"),
+        fai=pjoin(WD, "{chrom}", "reference.fa.fai"),
+    shell:
+        """
+        samtools faidx {input.fa} {wildcards.chrom} > {output.fa}
+        samtools faidx {output.fa}
+        """
+
+
+rule extract_chrom_vcf:
+    input:
+        fa=pjoin(WD, "{chrom}", "reference.fa"),
+        vcf=VCF,
+    output:
+        vcf=pjoin(WD, "{chrom}", "n{n}", "variations.vcf.gz"),
+        tbi=pjoin(WD, "{chrom}", "n{n}", "variations.vcf.gz.tbi"),
+    params:
+        sample=lambda wildcards: ",".join(ALL_SAMPLES[wildcards.n]),
+    conda:
+        "./envs/bcftools.yaml"
+    shell:
+        """
+        $CONDA_PREFIX/bin/bcftools view {input.vcf} {wildcards.chrom} | $CONDA_PREFIX/bin/bcftools view --samples {params.sample} | $CONDA_PREFIX/bin/bcftools view -c1 | $CONDA_PREFIX/bin/bcftools norm --check-ref e --fasta-ref {input.fa} | $CONDA_PREFIX/bin/bcftools +$CONDA_PREFIX/libexec/bcftools/remove-overlaps.so | $CONDA_PREFIX/bin/bcftools +$CONDA_PREFIX/libexec/bcftools/missing2ref.so | $CONDA_PREFIX/bin/bcftools +setGT -- -t . -n 0 | $CONDA_PREFIX/bin/bcftools sort | python3 remove_duplicates_from_vcf.py | bgzip -c > {output.vcf}
+        tabix -p vcf {output.vcf}
+        """
+
+
+rule construct_graph:
+    input:
+        fa=pjoin(WD, "{chrom}", "reference.fa"),
+        vcf=pjoin(WD, "{chrom}", "n{n}", "variations.vcf.gz"),
+    output:
+        vg=pjoin(WD, "{chrom}", "n{n}", "pangenome-full.vg"),
+    params:
+        wd=pjoin(WD, "{chrom}", "n{n}", "construction"),
+        n=NODE_MAX,
+    threads: workflow.cores
+    shell:
+        """
+        mkdir -p {params.wd}
+        vg construct --threads {threads} --node-max {params.n} --reference {input.fa} --alt-paths --vcf {input.vcf} | vg mod --threads {threads} --unchop - > {params.wd}/pangenome.walts.vg
+        vg gbwt --num-threads {threads} --discard-overlaps --vcf-input {input.vcf} --xg-name {params.wd}/pangenome.walts.vg --output {params.wd}/haplotypes.gbwt
+        vg paths --threads {threads} --drop-paths --variant-paths -x {params.wd}/pangenome.walts.vg > {params.wd}/pangenome.ref.vg
+        #
+        vg paths --extract-gam --gbwt {params.wd}/haplotypes.gbwt -x {params.wd}/pangenome.ref.vg > {params.wd}/haplotypes.gam
+        vg augment --label-paths {params.wd}/pangenome.ref.vg {params.wd}/haplotypes.gam | vg mod --remove-non-path - > {output.vg}
+        """
+
+
+rule vg2gfa:
+    input:
+        "{x}.vg",
+    output:
+        "{x}.gfa",
+    shell:
+        """
+        vg view {input} > {output}
+        """
+
+
+rule remove_sample_from_graph:
+    input:
+        vg=pjoin(WD, "{chrom}", "n{n}", "pangenome-full.vg"),
+    output:
+        vg=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.vg"),
+    threads: workflow.cores
+    shell:
+        """
+        vg paths --drop-paths --paths-by {new_sample} -x {input.vg} | vg mod --remove-non-path - | vg mod --unchop - > {output.vg}
+        """
+
+
+rule get_new_haplotypes:
+    input:
+        vg=pjoin(WD, "{chrom}", f"n{Ns[0]}", "pangenome-full.vg"),
+    output:
+        fa=pjoin(WD, "{chrom}", "new_haplotypes.fa"),
+    shell:
+        """
+        vg paths --extract-fasta --xg {input.vg} --paths-by "{new_sample}#1" > {output.fa}
+        vg paths --extract-fasta --xg {input.vg} --paths-by "{new_sample}#2" >> {output.fa}
+        samtools faidx {output.fa}
+        """
+
+
+rule simulate_reads:
+    input:
+        fa=pjoin(WD, "{chrom}", "new_haplotypes.fa"),
+    output:
+        fq1=pjoin(WD, "{chrom}", "reads_R1.fastq"),
+        fq2=pjoin(WD, "{chrom}", "reads_R2.fastq"),
+    params:
+        prefix=pjoin(WD, "{chrom}", "reads"),
+    conda:
+        "./envs/insilicoseq.yaml"
+    threads: workflow.cores
+    shell:
+        """
+        # XXX: hardcoded
+        NUM_READS=$(echo "$(cut -f2 {input.fa}.fai | paste -sd+ | bc)*15/300" | bc)
+        iss generate --genomes {input.fa} --n_reads $NUM_READS --cpus {threads} --seed {SEED} --model hiseq --output {params.prefix}
+        """
+
+
+rule kmc:
+    input:
+        fq1=pjoin(WD, "{chrom}", "reads_R1.fastq"),
+        fq2=pjoin(WD, "{chrom}", "reads_R2.fastq"),
+    output:
+        pjoin(WD, "{chrom}", "reads.kmc_pre"),
+        pjoin(WD, "{chrom}", "reads.kmc_suf"),
+    params:
+        prefix=pjoin(WD, "{chrom}", "reads"),
+        k=31,
+        ci=2,
+    conda:
+        "./envs/kmc.yaml"
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "kmc.time"),
+    threads: workflow.cores
+    shell:
+        """
+        ls {input} > {params.prefix}.list
+        mkdir -p {params.prefix}.kmc_tmp
+        /usr/bin/time -vo {log} kmc -t{threads} -k{params.k} -fq -ci{params.ci} -okmc @{params.prefix}.list {params.prefix} {params.prefix}.kmc_tmp
+        """
+
+
+rule score_graph:
+    input:
+        # "NEW",
+        pre=pjoin(WD, "{chrom}", "reads.kmc_pre"),
+        suf=pjoin(WD, "{chrom}", "reads.kmc_suf"),
+        gfa=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.gfa"),
+    output:
+        pgf=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.pgf"),
+    threads: workflow.cores
+    params:
+        kmc_prefix=pjoin(WD, "{chrom}", "reads"),
+        beta=BETA,
+        parser=PARSER,
+    log:
+        t1=pjoin(WD, "benchmark", "{chrom}", "n{n}", "scoring_1.time"),
+        t2=pjoin(WD, "benchmark", "{chrom}", "n{n}", "scoring_2.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log.t1} {params.parser} {params.beta} {input.gfa} {params.kmc_prefix} {threads} > {output.pgf}.tmp
+        /usr/bin/time -vo {log.t2} python3 script.py {input.gfa} {output.pgf}.tmp > {output.pgf}
+        """
+
+
+rule extract_2paths:
+    input:
+        # "NEW",
+        pgf=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.pgf"),
+        gfa=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.gfa"),
+    output:
+        gfa=pjoin(WD, "{chrom}", "n{n}", "pangenome-2paths.gfa"),
+    params:
+        alpha=ALPHA,
+        algo=ALGO,
+        path_finder=PATH_FINDER,
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "path_extraction.time"),
+    shell:
+        """
+        export LD_LIBRARY_PATH="/opt/or-tools/lib/:$LD_LIBRARY_PATH"
+        {params.path_finder} {input.pgf} {params.alpha} {params.algo} {input.gfa} > {output.gfa}
+        """
+
+
+########################
+### VG ON FULL GRAPH ###
+########################
+rule vg_index:
+    input:
+        gfa=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.gfa"),
+    output:
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.giraffe.gbz"),
+        mn=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.shortread.withzip.min"),
+        zc=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.shortread.zipcodes"),
+        dist=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.dist"),
+    threads: workflow.cores
+    params:
+        prefix=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}"),
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "vg-index.{graph}.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log} vg autoindex --no-guessing --workflow sr-giraffe --gfa {input.gfa} --prefix {params.prefix} --threads {threads}
+        """
+
+
+rule vg_giraffe_nosampling:
+    input:
+        fq1=pjoin(WD, "{chrom}", "reads_R1.fastq"),
+        fq2=pjoin(WD, "{chrom}", "reads_R2.fastq"),
+        #
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.giraffe.gbz"),
+        mn=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.shortread.withzip.min"),
+        zc=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.shortread.zipcodes"),
+        dist=pjoin(WD, "{chrom}", "n{n}", "pangenome-{graph}.dist"),
+    output:
+        gam=pjoin(WD, "{chrom}", "n{n}", "giraffe-{graph}.gam"),
+    threads: workflow.cores
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "vg-giraffe.{graph}.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log} vg giraffe --gbz-name {input.gbz} --minimizer-name {input.mn} --zipcode-name {input.zc} --dist-name {input.dist} --progress --threads {threads} --output-format gam --fastq-in {input.fq1} --fastq-in {input.fq2} > {output.gam}
+        """
+
+
+#         touch {input.swm} && touch {input.shz}
+
+# touch {output[1]} ;  touch {output[2]}
+
+############################
+### VG WITH DOWNSAMPLING ###
+############################
+
+
+rule vg_rindex:
+    input:
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.giraffe.gbz"),
+    output:
+        ri=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.giraffe.ri"),
+    threads: workflow.cores
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "vg-rindex.oneout.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log} vg gbwt -p --num-threads {threads} -r {output.ri} -Z {input.gbz}
+        """
+
+
+rule haplotypes:
+    input:
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.giraffe.gbz"),
+        ri=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.giraffe.ri"),
+        dist=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.dist"),
+    output:
+        hapl=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.hapl"),
+    threads: workflow.cores
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "vg-haplotypes.oneout.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log} vg haplotypes -t {threads} -d {input.dist} -r {input.ri} -H {output.hapl} {input.gbz}
+        """
+
+
+rule kmc2kff:
+    input:
+        pre=pjoin(WD, "{chrom}", "reads.kmc_pre"),
+        suf=pjoin(WD, "{chrom}", "reads.kmc_suf"),
+    output:
+        kff=pjoin(WD, "{chrom}", "reads.kff"),
+    params:
+        prefix=pjoin(WD, "{chrom}", "reads"),
+    threads: workflow.cores
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "kmc2kff.time"),
+    conda:
+        "./envs/kmc.yaml"
+    shell:
+        """
+        /usr/bin/time -vo {log} kmc_tools -t{threads} transform {params.prefix} sort {params.prefix} -okff
+        """
+
+
+rule vg_sample_graph:
+    input:
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.giraffe.gbz"),
+        hapl=pjoin(WD, "{chrom}", "n{n}", "pangenome-oneout.hapl"),
+        kff=pjoin(WD, "{chrom}", "reads.kff"),
+    output:
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-sampled.gbz"),
+    threads: workflow.cores
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "vg-sampling.oneout.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log} vg haplotypes -t {threads} --include-reference --diploid-sampling -i {input.hapl} -k {input.kff} -g {output.gbz} {input.gbz}
+        """
+
+
+rule vg_giraffe_sampling:
+    input:
+        fq1=pjoin(WD, "{chrom}", "reads_R1.fastq"),
+        fq2=pjoin(WD, "{chrom}", "reads_R2.fastq"),
+        #
+        gbz=pjoin(WD, "{chrom}", "n{n}", "pangenome-sampled.gbz"),
+    output:
+        gam=pjoin(WD, "{chrom}", "n{n}", "giraffe-sampled.gam"),
+    threads: workflow.cores
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "n{n}", "vg-giraffe.sampled.time"),
+    shell:
+        """
+        /usr/bin/time -vo {log} vg giraffe -t{threads} -p --gbz-name {input.gbz} --fastq-in {input.fq1} --fastq-in {input.fq2} --output-format gam > {output.gam}
+        """
+
+
+########################
+### BWA TO REFERENCE ###
+########################
+rule bwa_index:
+    input:
+        fa=pjoin(WD, "{chrom}", "reference.fa"),
+    output:
+        pjoin(WD, "{chrom}", "reference.fa.sa"),
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "bwa_index.time"),
+    conda:
+        "./envs/bwa.yaml"
+    shell:
+        """
+        /usr/bin/time -vo {log} bwa index {input.fa}
+        """
+
+
+rule bwa_mem:
+    input:
+        fa=pjoin(WD, "{chrom}", "reference.fa"),
+        sa=pjoin(WD, "{chrom}", "reference.fa.sa"),
+        fq1=pjoin(WD, "{chrom}", "reads_R1.fastq"),
+        fq2=pjoin(WD, "{chrom}", "reads_R2.fastq"),
+    output:
+        bam=pjoin(WD, "{chrom}", "alignments.bam"),
+    log:
+        pjoin(WD, "benchmark", "{chrom}", "bwa_mem.time"),
+    conda:
+        "./envs/bwa.yaml"
+    threads: workflow.cores
+    shell:
+        """
+        /usr/bin/time -vo {log} bwa mem -t{threads} {input.fa} {input.fq1} {input.fq2} | samtools view -bS | samtools sort > {output.bam}
+        samtools index {output.bam}
+        """
