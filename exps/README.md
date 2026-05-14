@@ -11,4 +11,8 @@ wget https://s3-us-west-2.amazonaws.com/human-pangenomics/pangenomes/freeze/free
 wget https://s3-us-west-2.amazonaws.com/human-pangenomics/pangenomes/freeze/freeze1/minigraph-cactus/hprc-v1.1-mc-chm13/hprc-v1.1-mc-chm13.vcfbub.a100k.wave.vcf.gz.tbi
 
 snakemake [-n] -c 16 -p --use-conda --config ref=chm13v2.0.fa vcf=hprc-v1.1-mc-chm13.vcfbub.a100k.wave.vcf.gz wd=OUTPUT-DIRECTORY
+# accuracy results:
+ls OUTPUT-DIRECTORY/results.tsv
+# efficiency results:
+ls OUTPUT-DIRECTORY/efficiency.tsv
 ```

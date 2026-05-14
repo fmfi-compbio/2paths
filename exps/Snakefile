@@ -44,6 +44,7 @@ ALGO = "greedy"  # config["algorithm"]
 rule run:
     input:
         pjoin(WD, "results.tsv"),
+        pjoin(WD, "efficiency.tsv"),
 
 
 rule merge_tsv:
@@ -59,7 +60,24 @@ rule merge_tsv:
         pjoin(WD, "results.tsv"),
     shell:
         """
-        python3 merge_tsv.py {WD} > {output}
+        python3 scripts/merge_tsv.py {WD} > {output}
+        """
+
+
+rule build_efficiency_table:
+    input:
+        expand(pjoin(WD, "{chrom}", "alignments.tsv"), chrom=CHROMs),
+        expand(
+            pjoin(WD, "{chrom}", "n{n}", "giraffe-{graph}.tsv"),
+            chrom=CHROMs,
+            n=Ns,
+            graph=["full", "oneout", "sampled", "2paths"],
+        ),
+    output:
+        pjoin(WD, "efficiency.tsv"),
+    shell:
+        """
+        python3 scripts/build_efficiency_table.py {WD} > {output}
         """
 
 
@@ -72,7 +90,7 @@ rule evaluate_bam:
         "./envs/pysam.yaml"
     shell:
         """
-        python3 stats.py bam {input.bam} > {output.tsv}
+        python3 scripts/get_stats.py bam {input.bam} > {output.tsv}
         """
 
 
@@ -83,7 +101,7 @@ rule evaluate_gam:
         tsv=pjoin(WD, "{chrom}", "n{n}", "giraffe-{graph}.tsv"),
     shell:
         """
-        vg filter --tsv-out "name;is_perfect;identity;cigar" {input.gam} | python3 stats.py gam - > {output.tsv}
+        vg filter --tsv-out "name;is_perfect;identity;cigar" {input.gam} | python3 scripts/get_stats.py gam - > {output.tsv}
         """
 
 
@@ -113,7 +131,7 @@ rule extract_chrom_vcf:
         "./envs/bcftools.yaml"
     shell:
         """
-        $CONDA_PREFIX/bin/bcftools view {input.vcf} {wildcards.chrom} | $CONDA_PREFIX/bin/bcftools view --samples {params.sample} | $CONDA_PREFIX/bin/bcftools view -c1 | $CONDA_PREFIX/bin/bcftools norm --check-ref e --fasta-ref {input.fa} | $CONDA_PREFIX/bin/bcftools +$CONDA_PREFIX/libexec/bcftools/remove-overlaps.so | $CONDA_PREFIX/bin/bcftools +$CONDA_PREFIX/libexec/bcftools/missing2ref.so | $CONDA_PREFIX/bin/bcftools +setGT -- -t . -n 0 | $CONDA_PREFIX/bin/bcftools sort | python3 remove_duplicates_from_vcf.py | bgzip -c > {output.vcf}
+        $CONDA_PREFIX/bin/bcftools view {input.vcf} {wildcards.chrom} | $CONDA_PREFIX/bin/bcftools view --samples {params.sample} | $CONDA_PREFIX/bin/bcftools view -c1 | $CONDA_PREFIX/bin/bcftools norm --check-ref e --fasta-ref {input.fa} | $CONDA_PREFIX/bin/bcftools +$CONDA_PREFIX/libexec/bcftools/remove-overlaps.so | $CONDA_PREFIX/bin/bcftools +$CONDA_PREFIX/libexec/bcftools/missing2ref.so | $CONDA_PREFIX/bin/bcftools +setGT -- -t . -n 0 | $CONDA_PREFIX/bin/bcftools sort | python3 scripts/remove_duplicates_from_vcf.py | bgzip -c > {output.vcf}
         tabix -p vcf {output.vcf}
         """
 
@@ -238,7 +256,7 @@ rule score_graph:
     shell:
         """
         /usr/bin/time -vo {log.t1} {params.parser} {params.beta} {input.gfa} {params.kmc_prefix} {threads} > {output.pgf}.tmp
-        /usr/bin/time -vo {log.t2} python3 script.py {input.gfa} {output.pgf}.tmp > {output.pgf}
+        /usr/bin/time -vo {log.t2} python3 scripts/change_header.py {input.gfa} {output.pgf}.tmp > {output.pgf}
         """
 
 
@@ -258,7 +276,7 @@ rule extract_2paths:
     shell:
         """
         export LD_LIBRARY_PATH="/opt/or-tools/lib/:$LD_LIBRARY_PATH"
-        {params.path_finder} {input.pgf} {params.alpha} {params.algo} {input.gfa} > {output.gfa}
+        /usr/bin/time -vo {log} {params.path_finder} {input.pgf} {params.alpha} {params.algo} {input.gfa} > {output.gfa}
         """
 
 
