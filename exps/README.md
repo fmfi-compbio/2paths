@@ -16,3 +16,9 @@ ls OUTPUT-DIRECTORY/results.tsv
 # efficiency results:
 ls OUTPUT-DIRECTORY/efficiency.tsv
 ```
+
+Obtaining tables with true vs. predicted vertex counts for paths:
+
+```
+snakemake [-n] -s table-comparison.smk -c 16 -p --use-conda --config wd=OUTPUT-DIRECTORY
+```
