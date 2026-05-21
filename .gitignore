@@ -1,2 +1,4 @@
 *~
 .snakemake
+or-tools*
+include/
