@@ -3,17 +3,17 @@
 #include "Graph.h"
 #include "kmc/kmc_api/kmc_file.h"
 
-constexpr int MAX_SINGLE_SCORE = 100;
-
 struct GraphScorer {
     Graph &graph;
+    // positive and negative counts in each vertex + (k-1) next bases, to calculate 100 * pos + beta * neg
+    std::vector<std::pair<int,int>> counts;
 
     GraphScorer(Graph &g);
 
-    void set_scores(const std::string &kmc_filename, int beta, int num_threads);
+    void set_scores(const std::string &kmc_filename, int num_threads);
 
-    int max_score(size_t vertex_idx, CKMCFile &ckmc_file, uint32 k,
-                  CKmerAPI &kmer, int beta) const;
+    std::pair<int, int> max_score(size_t vertex_idx, CKMCFile &ckmc_file, uint32 k,
+                                  CKmerAPI &kmer) const;
 
     void print_path_names(const std::vector<int> &path,
                           std::ostream &out) const;
@@ -21,7 +21,7 @@ struct GraphScorer {
     static void print_path_names(const std::vector<std::string> &path,
                                  std::ostream &out);
 
-    void write_internal_format(std::ostream &out);
+    void write_internal_format(std::ostream &out) const;
 };
 
 void print_spaced(const std::vector<std::string> &items, std::ostream &out);
