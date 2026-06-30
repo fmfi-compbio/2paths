@@ -21,7 +21,7 @@
 using namespace std;
 
 static void usage() {
-    cerr << "Usage: ./program <graph.pgf> <alpha> <algorithm> (Optional "
+    cerr << "Usage: ./program <graph.pgf> <alpha> <beta> <algorithm> (Optional "
             "<graph.gfa>); "
             "algorithm is either suurballe "
             "(works only for nonnegative scores), or mincostflow, or greedy.\n"
@@ -29,6 +29,8 @@ static void usage() {
             "specified in <graph.pgf> based on alpha and scores of vertices. "
             "<graph.pgf> must match <graph.gfa>.\n"
             "<alpha> is a number between 0 and 1 with two decimal places.\n"
+            "<beta> is an integer lesser or equal to 0. Beta = -100 is interpreted as -1 "
+            "(multiplication by 100 is needed for the problem to be stated in integers).\n"
             "If <graph.gfa> is specified it outputs given GFA, but without "
             "unused vertices and edges in found paths. "
             "It also adds 2 W (walk lines) at the end of produced GFA. They "
@@ -38,10 +40,13 @@ static void usage() {
             "from <graph.pgf>.\n";
 }
 
+constexpr int MAX_SINGLE_SCORE = 100;
+
 struct Program {
     string pgf_path, algorithm, gfa_path = "";
     string start, target;
     Alpha alpha;
+    int beta;
     bool no_gfa = false;
     const int alpha_denominator = 100;
 
@@ -51,9 +56,10 @@ struct Program {
             args.push_back(argv[i]);
         pgf_path = args[1];
         alpha.set(parse_alpha(string(args[2])), alpha_denominator);
-        algorithm = args[3];
-        if (argc >= 5) {
-            gfa_path = args[4];
+        beta = stoi(args[3]);
+        algorithm = args[4];
+        if (argc >= 6) {
+            gfa_path = args[5];
         } else {
             no_gfa = true;
         }
@@ -115,13 +121,16 @@ struct Program {
         vector<pair<string, string>> edgs;
         for (int i = 0; i < n; i++) {
             string name;
-            int score = 0, outdeg = 0;
-            if (!(in >> name >> score >> outdeg)) {
-                cerr << name << " " << score << " " << outdeg << std::endl;
+            int pos_count = 0;
+            int neg_count = 0;
+            int outdeg = 0;
+            if (!(in >> name >> pos_count >> neg_count >> outdeg)) {
+                cerr << name << " " << pos_count << " " << neg_count << " " << outdeg << std::endl;
                 throw runtime_error("invalid vertex record in scores file " +
                                     pgf_path);
             }
-            if (auto [it, inserted] = score_of.emplace(name, (int)score);
+            int score = pos_count * MAX_SINGLE_SCORE + beta * neg_count;
+            if (auto [it, inserted] = score_of.emplace(name, score);
                 !inserted) {
                 throw runtime_error("duplicate vertex name '" + name +
                                     "' in scores file " + pgf_path);
@@ -174,7 +183,7 @@ int main(int argc, char **argv) {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
-    if (argc < 4) {
+    if (argc < 5) {
         usage();
         return 1;
     }

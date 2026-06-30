@@ -118,7 +118,7 @@ void update_weights(std::vector<long double> &score_map, Alpha alpha,
                                static_cast<long double>(alpha.denominator);
     for (int u : path) {
         if (score_map[u] < 0) {
-            score_map[u] = (double)2 - factor;
+            score_map[u] *= 2.0l - factor;
         } else {
             score_map[u] *= factor;
         }
