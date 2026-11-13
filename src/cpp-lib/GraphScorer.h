@@ -27,5 +27,7 @@ struct GraphScorer {
 void print_spaced(const std::vector<std::string> &items, std::ostream &out);
 
 std::pair<int, int> check_kmer_both_strands(const std::string &sequence,
+                                            const size_t start,
+                                            const size_t end,
                                             CKMCFile &kmc_db, uint32 k,
                                             CKmerAPI &kmer);

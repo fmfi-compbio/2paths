@@ -13,15 +13,22 @@ std::pair<int, int> GraphScorer::max_score(const size_t vertex_idx, CKMCFile &ck
                                            const uint32 k, CKmerAPI &kmer) const {
     // vertex_id, depth
     std::stack<std::pair<size_t, size_t>> vertex_stack;
-    // possibly slow because copying strings
+    // XXX: possibly slow because copying strings
     std::vector<std::string> string_stack;
 
     std::pair max_scores_ = {INT_MIN,0};
+
+    // XXX: we don't have a score for sinks
 
     vertex_stack.emplace(vertex_idx, 1);
     const std::string &vertex_idx_sequence = graph.sequences.at(vertex_idx);
     string_stack.push_back(vertex_idx_sequence);
     const auto vertex_idx_sequence_length = vertex_idx_sequence.length();
+
+    std::pair<int, int> counts_prefix = {0,0}; // Count now, sum later to suffix
+    if (vertex_idx_sequence_length >= k) {
+        counts_prefix = check_kmer_both_strands(vertex_idx_sequence, 0, vertex_idx_sequence_length, ckmc_file, k, kmer);
+    }
 
     while (!vertex_stack.empty()) {
         auto [curr_vertex, depth] = vertex_stack.top();
@@ -36,17 +43,23 @@ std::pair<int, int> GraphScorer::max_score(const size_t vertex_idx, CKMCFile &ck
 
         // length - vertex_idx_sequence_length is at least k - 1
         if (length >= (k - 1) + vertex_idx_sequence_length) {
+            // std::ranges::take_view<std::ranges::join_view<std::vector<std::string>>>
             auto joined_string_stack =
                 string_stack | std::views::join |
                 std::views::take(vertex_idx_sequence_length + k - 1);
             std::string resulting_sequence;
-            resulting_sequence.reserve(k - 1);
+            auto count = std::ranges::distance(joined_string_stack);
+            resulting_sequence.reserve(static_cast<std::size_t>(count));
             std::ranges::copy(joined_string_stack,
                               std::back_inserter(resulting_sequence));
-            auto counts_ = check_kmer_both_strands(resulting_sequence, ckmc_file, k, kmer);
+            // std::cerr << count << " " << resulting_sequence.size() << std::endl;
+
+            int start = vertex_idx_sequence_length < k ? 0 : vertex_idx_sequence_length - (k - 1);
+            std::pair<int, int> counts_suffix = check_kmer_both_strands(resulting_sequence, start, resulting_sequence.size(), ckmc_file, k, kmer);
             // (100 * pos1 + beta neg1) > (100 * pos2 + beta neg2) iff pos1 > pos2 because pos1 + neg1 = pos2 + neg2 = # of k-mers in string.
-            if (counts_.first > max_scores_.first) {
-                max_scores_ = counts_;
+            counts_suffix = {counts_prefix.first + counts_suffix.first, counts_prefix.second + counts_suffix.second};
+            if (counts_suffix.first > max_scores_.first) {
+                max_scores_ = counts_suffix;
             }
         } else {
             for (auto child : graph.edges.at(curr_vertex)) {
@@ -118,11 +131,13 @@ void print_spaced(const std::vector<std::string> &items, std::ostream &out) {
 }
 
 std::pair<int, int> check_kmer_both_strands(const std::string &sequence,
+                                            const size_t start,
+                                            const size_t end,
                                             CKMCFile &kmc_db, const uint32_t k,
                                             CKmerAPI &kmer) {
     int pos = 0;
     int neg = 0;
-    for (size_t i = 0; i + k <= sequence.length(); i++) {
+    for (size_t i = start; i + k <= end; i++) {
         kmer.from_string(sequence.substr(i, k));
 
         bool seen = false;
