@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Graph.h"
-#include "kmc/kmc_api/kmc_file.h"
+#include "kmc_api/kmc_file.h"
 
 struct GraphScorer {
     Graph &graph;

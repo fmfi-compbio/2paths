@@ -2,3 +2,4 @@
 .snakemake
 or-tools*
 include/
+src/build
